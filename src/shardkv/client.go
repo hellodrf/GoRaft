@@ -8,7 +8,9 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "../labrpc"
+import (
+	"GoRaft_MIT_6.824/src/raft"
+)
 import "crypto/rand"
 import "math/big"
 import "../shardmaster"
@@ -38,7 +40,7 @@ func nrand() int64 {
 type Clerk struct {
 	sm       *shardmaster.Clerk
 	config   shardmaster.Config
-	make_end func(string) *labrpc.ClientEnd
+	make_end func(string) *raft.ClientEnd
 	// You will have to modify this struct.
 }
 
@@ -51,7 +53,7 @@ type Clerk struct {
 // Config.Groups[gid][i] into a labrpc.ClientEnd on which you can
 // send RPCs.
 //
-func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *Clerk {
+func MakeClerk(masters []*raft.ClientEnd, make_end func(string) *raft.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end

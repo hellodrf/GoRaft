@@ -1,11 +1,11 @@
 package shardmaster
 
 
-import "../raft"
-import "../labrpc"
+import (
+	"../raft"
+	raft2 "GoRaft_MIT_6.824/src/raft"
+)
 import "sync"
-import "../labgob"
-
 
 type ShardMaster struct {
 	mu      sync.Mutex
@@ -63,14 +63,14 @@ func (sm *ShardMaster) Raft() *raft.Raft {
 // form the fault-tolerant shardmaster service.
 // me is the index of the current server in servers[].
 //
-func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister) *ShardMaster {
+func StartServer(servers []*raft2.ClientEnd, me int, persister *raft.Persister) *ShardMaster {
 	sm := new(ShardMaster)
 	sm.me = me
 
 	sm.configs = make([]Config, 1)
 	sm.configs[0].Groups = map[int][]string{}
 
-	labgob.Register(Op{})
+	raft2.Register(Op{})
 	sm.applyCh = make(chan raft.ApplyMsg)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 

@@ -4,13 +4,15 @@ package shardmaster
 // Shardmaster clerk.
 //
 
-import "../labrpc"
+import (
+	"GoRaft_MIT_6.824/src/raft"
+)
 import "time"
 import "crypto/rand"
 import "math/big"
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
+	servers []*raft.ClientEnd
 	// Your data here.
 }
 
@@ -21,7 +23,7 @@ func nrand() int64 {
 	return x
 }
 
-func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
+func MakeClerk(servers []*raft.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.

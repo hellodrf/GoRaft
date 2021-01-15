@@ -20,11 +20,11 @@ package raft
 import (
 	"log"
 	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 )
 import "sync/atomic"
-import "../labrpc"
 
 // import "bytes"
 // import "../labgob"
@@ -50,16 +50,15 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	mu        sync.Mutex   // Lock to protect shared access to this peer's state
+	peers     []*ClientEnd // RPC end points of all peers
+	persister *Persister   // Object to hold this peer's persisted state
+	me        int          // this peer's index into peers[]
+	dead      int32        // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
 	// Persistent
 	currentTerm int32
 	votedFor    int32
@@ -80,6 +79,11 @@ type Raft struct {
 type LogEntry struct {
 	Term    int32
 	Command string
+}
+
+func (rf *Raft) Log(s string) {
+	log.Println("Node", strconv.Itoa(rf.me)+" (S"+strconv.Itoa(int(rf.state))+"|T"+strconv.Itoa(int(rf.currentTerm))+
+		"|L"+strconv.Itoa(int(rf.votedFor))+"): "+s)
 }
 
 // return currentTerm and whether this server
@@ -175,7 +179,7 @@ func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	log.Println("Node", rf.me, ": Heartbeat from ", args.LeaderId)
+	rf.Log("Heartbeat received from " + strconv.Itoa(args.LeaderId))
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		return
@@ -184,8 +188,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if atomic.LoadInt32(&rf.state) == 1 {
 		rf.heartbeatChan <- 0 // stop heartbeat
 	}
-	atomic.StoreInt32(&rf.currentTerm, reply.Term)
+	atomic.StoreInt32(&rf.currentTerm, args.Term)
+	reply.Term = rf.currentTerm
 	atomic.StoreInt32(&rf.state, -1)
+	atomic.StoreInt32(&rf.votedFor, int32(args.LeaderId))
+	rf.Log("Accepted leader " + strconv.Itoa(args.LeaderId))
 	rf.electionChan <- 1
 }
 
@@ -203,6 +210,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	vt := atomic.LoadInt32(&rf.votedFor)
 	if vt == -1 || vt == args.CandidateId {
 		reply.VoteGranted = true
+		atomic.StoreInt32(&rf.votedFor, args.CandidateId)
 		return
 	} else {
 		reply.VoteGranted = false
@@ -294,19 +302,20 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) election(source string) {
 
 	voteCount := int32(0)
-	if !atomic.CompareAndSwapInt32(&rf.state, rf.state, 0) {
+
+	if atomic.LoadInt32(&rf.state) != -2 {
+		rf.Log("Election ceased, leader already existed")
+		return
+	}
+
+	if !atomic.CompareAndSwapInt32(&rf.currentTerm, rf.currentTerm, rf.currentTerm+1) {
 		// only competing process is *accepting a new leader*
 		return
 	}
-
-	if rf.votedFor != -1 {
-		return
-	}
-
-	log.Println("Node", rf.me, ": Election triggered by "+source)
-	log.Println("Node", rf.me, ": voted myself!")
+	rf.Log("Election triggered by " + source)
 	atomic.StoreInt32(&rf.state, 0)
 	atomic.StoreInt32(&rf.votedFor, int32(rf.me))
+	rf.Log("Voted myself!")
 	voteCount = int32(1)
 	voteFailed := int32(0)
 	threshold := int32(len(rf.peers) / 2)
@@ -324,20 +333,21 @@ func (rf *Raft) election(source string) {
 				if reply.VoteGranted {
 					for !atomic.CompareAndSwapInt32(&voteCount, voteCount, voteCount+1) {
 					}
-					log.Println("Node", rf.me, ": vote received from node", i)
+					rf.Log("Vote received from node " + strconv.Itoa(i))
 					if voteCount > threshold && atomic.LoadInt32(&rf.dead) == 0 {
 						// we won!
-						log.Println("Node", rf.me, "won election term", rf.currentTerm)
+						rf.Log("Won election!")
 						atomic.StoreInt32(&rf.state, 1)
+						rf.heartbeat()
 						rf.heartbeatChan <- 1
 						return
 					}
 				} else {
 					voteFailed += 1
-					log.Println("Node", rf.me, ": devote received from node", i)
+					rf.Log("De-vote received from node " + strconv.Itoa(i))
 				}
 			} else {
-				log.Println("Failed to send requestVote RPC to peer", i)
+				rf.Log("Failed to send requestVote RPC to peer " + strconv.Itoa(i))
 			}
 		}
 
@@ -345,7 +355,7 @@ func (rf *Raft) election(source string) {
 			return
 		}
 		if rf.killed() {
-			log.Println("Raft node is dead, election goroutine returned.")
+			rf.Log("Raft node is dead, election goroutine returned.")
 			return
 		}
 	}
@@ -353,31 +363,27 @@ func (rf *Raft) election(source string) {
 		return
 	}
 
-	for voteFailed+voteCount != int32(len(rf.peers)) {
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	if voteFailed >= threshold && atomic.LoadInt32(&rf.dead) == 0 {
-		log.Println("Node", rf.me, ": No one won!")
+	if voteCount <= threshold && atomic.LoadInt32(&rf.dead) == 0 {
+		rf.Log("No one won election!")
 		time.Sleep(time.Duration(rand.Intn(200-100) + 100))
-		//rf.election("failed election")
+		rf.election("failed election")
 	}
 }
 
 func (rf *Raft) heartbeat() {
-	args := AppendEntriesArgs{
+	args := &AppendEntriesArgs{
 		Term:         atomic.LoadInt32(&rf.currentTerm),
 		LeaderId:     rf.me,
 		PrevLogIndex: 0,
 		Entries:      nil,
 		LeaderCommit: 0,
 	}
-	reply := AppendEntriesReply{}
+	reply := &AppendEntriesReply{}
 
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
-			rf.SendAppendEntries(i, &args, &reply)
-			log.Println("Node", rf.me, ": Heartbeat sent to ", i)
+			rf.Log("Heartbeat sent to " + strconv.Itoa(i))
+			rf.SendAppendEntries(i, args, reply)
 		}
 	}
 }
@@ -393,7 +399,7 @@ func (rf *Raft) heartbeat() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func Make(peers []*labrpc.ClientEnd, me int,
+func Make(peers []*ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
@@ -401,8 +407,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.state = 0
-	rf.currentTerm = -1
+	rf.state = -2
+	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logs = make([]LogEntry, 1000)
 	rf.commitIndex = -1
@@ -413,15 +419,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go func() {
 		rand.Seed(time.Now().UnixNano())
-		s := time.Duration(rand.Intn(550-450) + 450) // 450ms - 849ms
-		time.Sleep(time.Duration(rand.Intn(3000)))
+		s := time.Duration(rand.Intn(550-450) + 450) // 450ms - 549ms
+		time.Sleep(time.Duration(rand.Intn(300)) * time.Millisecond)
 
 		rf.election("fresh startup")
 
 		select {
 		case o := <-rf.electionChan:
 			if o < 0 {
-				log.Println("Election goroutine received stop signal ", o)
+				rf.Log("Election goroutine received stop signal " + strconv.Itoa(o))
 				return
 			}
 		case <-time.After(s * time.Millisecond):
@@ -432,11 +438,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}()
 
 	go func() {
+		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 		for {
 			i := <-rf.heartbeatChan
 			switch i {
 			case -1:
-				log.Println("Heartbeat goroutine received stop signal ", i)
+				rf.Log("Heartbeat goroutine received stop signal " + strconv.Itoa(i))
 				return
 			case 1:
 				select {
@@ -444,7 +451,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.heartbeat()
 				case s := <-rf.heartbeatChan:
 					if s == -1 {
-						log.Println("Heartbeat goroutine received stop signal ", s)
+						rf.Log("Heartbeat goroutine received stop signal " + strconv.Itoa(s))
 						return
 					}
 					if s == 0 {

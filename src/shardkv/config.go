@@ -1,7 +1,9 @@
 package shardkv
 
-import "../shardmaster"
-import "../labrpc"
+import (
+	"../shardmaster"
+	raft2 "GoRaft_MIT_6.824/src/raft"
+)
 import "testing"
 import "os"
 
@@ -32,8 +34,8 @@ func makeSeed() int64 {
 }
 
 // Randomize server handles
-func random_handles(kvh []*labrpc.ClientEnd) []*labrpc.ClientEnd {
-	sa := make([]*labrpc.ClientEnd, len(kvh))
+func random_handles(kvh []*raft2.ClientEnd) []*raft2.ClientEnd {
+	sa := make([]*raft2.ClientEnd, len(kvh))
 	copy(sa, kvh)
 	for i := range sa {
 		j := rand.Intn(i + 1)
@@ -53,7 +55,7 @@ type group struct {
 type config struct {
 	mu    sync.Mutex
 	t     *testing.T
-	net   *labrpc.Network
+	net   *raft2.Network
 	start time.Time // time at which make_config() was called
 
 	nmasters      int
@@ -117,7 +119,7 @@ func (cfg *config) makeClient() *Clerk {
 	defer cfg.mu.Unlock()
 
 	// ClientEnds to talk to master service.
-	ends := make([]*labrpc.ClientEnd, cfg.nmasters)
+	ends := make([]*raft2.ClientEnd, cfg.nmasters)
 	endnames := make([]string, cfg.n)
 	for j := 0; j < cfg.nmasters; j++ {
 		endnames[j] = randstring(20)
@@ -126,7 +128,7 @@ func (cfg *config) makeClient() *Clerk {
 		cfg.net.Enable(endnames[j], true)
 	}
 
-	ck := MakeClerk(ends, func(servername string) *labrpc.ClientEnd {
+	ck := MakeClerk(ends, func(servername string) *raft2.ClientEnd {
 		name := randstring(20)
 		end := cfg.net.MakeEnd(name)
 		cfg.net.Connect(name, servername)
@@ -211,7 +213,7 @@ func (cfg *config) StartServer(gi int, i int) {
 	}
 
 	// and the connections to other servers in this group.
-	ends := make([]*labrpc.ClientEnd, cfg.n)
+	ends := make([]*raft2.ClientEnd, cfg.n)
 	for j := 0; j < cfg.n; j++ {
 		ends[j] = cfg.net.MakeEnd(gg.endnames[i][j])
 		cfg.net.Connect(gg.endnames[i][j], cfg.servername(gg.gid, j))
@@ -219,7 +221,7 @@ func (cfg *config) StartServer(gi int, i int) {
 	}
 
 	// ends to talk to shardmaster service
-	mends := make([]*labrpc.ClientEnd, cfg.nmasters)
+	mends := make([]*raft2.ClientEnd, cfg.nmasters)
 	gg.mendnames[i] = make([]string, cfg.nmasters)
 	for j := 0; j < cfg.nmasters; j++ {
 		gg.mendnames[i][j] = randstring(20)
@@ -242,7 +244,7 @@ func (cfg *config) StartServer(gi int, i int) {
 
 	gg.servers[i] = StartServer(ends, i, gg.saved[i], cfg.maxraftstate,
 		gg.gid, mends,
-		func(servername string) *labrpc.ClientEnd {
+		func(servername string) *raft2.ClientEnd {
 			name := randstring(20)
 			end := cfg.net.MakeEnd(name)
 			cfg.net.Connect(name, servername)
@@ -250,9 +252,9 @@ func (cfg *config) StartServer(gi int, i int) {
 			return end
 		})
 
-	kvsvc := labrpc.MakeService(gg.servers[i])
-	rfsvc := labrpc.MakeService(gg.servers[i].rf)
-	srv := labrpc.MakeServer()
+	kvsvc := raft2.MakeService(gg.servers[i])
+	rfsvc := raft2.MakeService(gg.servers[i].rf)
+	srv := raft2.MakeServer()
 	srv.AddService(kvsvc)
 	srv.AddService(rfsvc)
 	cfg.net.AddServer(cfg.servername(gg.gid, i), srv)
@@ -266,7 +268,7 @@ func (cfg *config) StartGroup(gi int) {
 
 func (cfg *config) StartMasterServer(i int) {
 	// ClientEnds to talk to other master replicas.
-	ends := make([]*labrpc.ClientEnd, cfg.nmasters)
+	ends := make([]*raft2.ClientEnd, cfg.nmasters)
 	for j := 0; j < cfg.nmasters; j++ {
 		endname := randstring(20)
 		ends[j] = cfg.net.MakeEnd(endname)
@@ -278,9 +280,9 @@ func (cfg *config) StartMasterServer(i int) {
 
 	cfg.masterservers[i] = shardmaster.StartServer(ends, i, p)
 
-	msvc := labrpc.MakeService(cfg.masterservers[i])
-	rfsvc := labrpc.MakeService(cfg.masterservers[i].Raft())
-	srv := labrpc.MakeServer()
+	msvc := raft2.MakeService(cfg.masterservers[i])
+	rfsvc := raft2.MakeService(cfg.masterservers[i].Raft())
+	srv := raft2.MakeServer()
 	srv.AddService(msvc)
 	srv.AddService(rfsvc)
 	cfg.net.AddServer(cfg.mastername(i), srv)
@@ -288,7 +290,7 @@ func (cfg *config) StartMasterServer(i int) {
 
 func (cfg *config) shardclerk() *shardmaster.Clerk {
 	// ClientEnds to talk to master service.
-	ends := make([]*labrpc.ClientEnd, cfg.nmasters)
+	ends := make([]*raft2.ClientEnd, cfg.nmasters)
 	for j := 0; j < cfg.nmasters; j++ {
 		name := randstring(20)
 		ends[j] = cfg.net.MakeEnd(name)
@@ -343,7 +345,7 @@ func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config
 	cfg := &config{}
 	cfg.t = t
 	cfg.maxraftstate = maxraftstate
-	cfg.net = labrpc.MakeNetwork()
+	cfg.net = raft2.MakeNetwork()
 	cfg.start = time.Now()
 
 	// master

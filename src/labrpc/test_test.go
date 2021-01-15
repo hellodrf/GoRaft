@@ -1,6 +1,9 @@
 package labrpc
 
-import "testing"
+import (
+	"GoRaft_MIT_6.824/src/raft"
+	"testing"
+)
 import "strconv"
 import "sync"
 import "runtime"
@@ -69,15 +72,15 @@ func (js *JunkServer) Handler7(args int, reply *string) {
 func TestBasic(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 
 	e := rn.MakeEnd("end1-99")
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer("server99", rs)
 
@@ -104,15 +107,15 @@ func TestBasic(t *testing.T) {
 func TestTypes(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 
 	e := rn.MakeEnd("end1-99")
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer("server99", rs)
 
@@ -146,15 +149,15 @@ func TestTypes(t *testing.T) {
 func TestDisconnect(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 
 	e := rn.MakeEnd("end1-99")
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer("server99", rs)
 
@@ -185,15 +188,15 @@ func TestDisconnect(t *testing.T) {
 func TestCounts(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 
 	e := rn.MakeEnd("end1-99")
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer(99, rs)
 
@@ -221,15 +224,15 @@ func TestCounts(t *testing.T) {
 func TestBytes(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 
 	e := rn.MakeEnd("end1-99")
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer(99, rs)
 
@@ -275,13 +278,13 @@ func TestBytes(t *testing.T) {
 func TestConcurrentMany(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer(1000, rs)
 
@@ -333,14 +336,14 @@ func TestConcurrentMany(t *testing.T) {
 func TestUnreliable(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 	rn.Reliable(false)
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer(1000, rs)
 
@@ -386,13 +389,13 @@ func TestUnreliable(t *testing.T) {
 func TestConcurrentOne(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer(1000, rs)
 
@@ -448,13 +451,13 @@ func TestConcurrentOne(t *testing.T) {
 func TestRegression1(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer(1000, rs)
 
@@ -523,15 +526,15 @@ func TestRegression1(t *testing.T) {
 func TestKilled(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 
 	e := rn.MakeEnd("end1-99")
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer("server99", rs)
 
@@ -568,15 +571,15 @@ func TestKilled(t *testing.T) {
 func TestBenchmark(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	rn := MakeNetwork()
+	rn := raft.MakeNetwork()
 	defer rn.Cleanup()
 
 	e := rn.MakeEnd("end1-99")
 
 	js := &JunkServer{}
-	svc := MakeService(js)
+	svc := raft.MakeService(js)
 
-	rs := MakeServer()
+	rs := raft.MakeServer()
 	rs.AddService(svc)
 	rn.AddServer("server99", rs)
 

@@ -1,6 +1,9 @@
 package labgob
 
-import "testing"
+import (
+	"GoRaft_MIT_6.824/src/raft"
+	"testing"
+)
 
 import "bytes"
 
@@ -25,11 +28,11 @@ type T3 struct {
 // test that we didn't break GOB.
 //
 func TestGOB(t *testing.T) {
-	e0 := errorCount
+	e0 := raft.errorCount
 
 	w := new(bytes.Buffer)
 
-	Register(T3{})
+	raft.Register(T3{})
 
 	{
 		x0 := 0
@@ -43,7 +46,7 @@ func TestGOB(t *testing.T) {
 		t2.T2map[99] = &T1{1, 2, "x", "y"}
 		t2.T2t3 = T3{999}
 
-		e := NewEncoder(w)
+		e := raft.NewEncoder(w)
 		e.Encode(x0)
 		e.Encode(x1)
 		e.Encode(t1)
@@ -58,7 +61,7 @@ func TestGOB(t *testing.T) {
 		var t2 T2
 
 		r := bytes.NewBuffer(data)
-		d := NewDecoder(r)
+		d := raft.NewDecoder(r)
 		if d.Decode(&x0) != nil ||
 			d.Decode(&x1) != nil ||
 			d.Decode(&t1) != nil ||
@@ -102,7 +105,7 @@ func TestGOB(t *testing.T) {
 		}
 	}
 
-	if errorCount != e0 {
+	if raft.errorCount != e0 {
 		t.Fatalf("there were errors, but should not have been")
 	}
 }
@@ -117,21 +120,21 @@ type T4 struct {
 // labgob prints one warning during this test.
 //
 func TestCapital(t *testing.T) {
-	e0 := errorCount
+	e0 := raft.errorCount
 
 	v := []map[*T4]int{}
 
 	w := new(bytes.Buffer)
-	e := NewEncoder(w)
+	e := raft.NewEncoder(w)
 	e.Encode(v)
 	data := w.Bytes()
 
 	var v1 []map[T4]int
 	r := bytes.NewBuffer(data)
-	d := NewDecoder(r)
+	d := raft.NewDecoder(r)
 	d.Decode(&v1)
 
-	if errorCount != e0+1 {
+	if raft.errorCount != e0+1 {
 		t.Fatalf("failed to warn about lower-case field")
 	}
 }
@@ -144,7 +147,7 @@ func TestCapital(t *testing.T) {
 // labgob does not print a warning.
 //
 func TestDefault(t *testing.T) {
-	e0 := errorCount
+	e0 := raft.errorCount
 
 	type DD struct {
 		X int
@@ -154,7 +157,7 @@ func TestDefault(t *testing.T) {
 	dd1 := DD{}
 
 	w := new(bytes.Buffer)
-	e := NewEncoder(w)
+	e := raft.NewEncoder(w)
 	e.Encode(dd1)
 	data := w.Bytes()
 
@@ -163,10 +166,10 @@ func TestDefault(t *testing.T) {
 	reply := DD{99}
 
 	r := bytes.NewBuffer(data)
-	d := NewDecoder(r)
+	d := raft.NewDecoder(r)
 	d.Decode(&reply)
 
-	if errorCount != e0+1 {
+	if raft.errorCount != e0+1 {
 		t.Fatalf("failed to warn about decoding into non-default value")
 	}
 }

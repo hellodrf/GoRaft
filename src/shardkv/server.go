@@ -2,12 +2,11 @@ package shardkv
 
 
 // import "../shardmaster"
-import "../labrpc"
+import (
+	raft2 "GoRaft_MIT_6.824/src/raft"
+)
 import "../raft"
 import "sync"
-import "../labgob"
-
-
 
 type Op struct {
 	// Your definitions here.
@@ -20,9 +19,9 @@ type ShardKV struct {
 	me           int
 	rf           *raft.Raft
 	applyCh      chan raft.ApplyMsg
-	make_end     func(string) *labrpc.ClientEnd
+	make_end     func(string) *raft2.ClientEnd
 	gid          int
-	masters      []*labrpc.ClientEnd
+	masters      []*raft2.ClientEnd
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
@@ -77,10 +76,10 @@ func (kv *ShardKV) Kill() {
 // StartServer() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, gid int, masters []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *ShardKV {
+func StartServer(servers []*raft2.ClientEnd, me int, persister *raft.Persister, maxraftstate int, gid int, masters []*raft2.ClientEnd, make_end func(string) *raft2.ClientEnd) *ShardKV {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
+	raft2.Register(Op{})
 
 	kv := new(ShardKV)
 	kv.me = me
