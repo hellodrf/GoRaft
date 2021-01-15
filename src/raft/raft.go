@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"log"
 	"sync"
+	"time"
 )
 import "sync/atomic"
 import "../labrpc"
@@ -68,6 +70,9 @@ type Raft struct {
 
 	nextIndex  []int32
 	matchIndex []int32
+
+	// Channels
+	electionChan chan int
 }
 
 type LogEntry struct {
@@ -133,10 +138,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term         int
+	Term         int32
 	CandidateId  int
-	lastLogIndex int
-	lastLogTerm  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -149,11 +154,25 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type AppendEntry struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	Entries      []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntryReply struct {
+	Term    int
+	Success bool
+}
+
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
 }
 
 //
@@ -228,6 +247,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.electionChan <- -1
 }
 
 func (rf *Raft) killed() bool {
@@ -255,6 +275,56 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.state = 0
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.logs = make([]LogEntry, 1000)
+	rf.commitIndex = -1
+	rf.lastApplied = -1
+
+	rf.electionChan = make(chan int)
+
+	go func() {
+		select {
+		case o := <-rf.electionChan:
+			if o < 0 {
+				log.Println("Election goroutine received stop signal ", o)
+				return
+			}
+		case <-time.After(500 * time.Millisecond):
+			log.Println("Election triggered by timeout.")
+
+			voteCount := int32(0)
+			threshold := int32(len(rf.peers) / 2)
+
+			for i := 0; i < len(rf.peers); i++ {
+				if atomic.LoadInt32(&rf.dead) == 1 {
+					log.Println("Raft node is dead, election goroutine returned.")
+					return
+				}
+				if i != rf.me {
+					args := &RequestVoteArgs{
+						Term:         rf.currentTerm,
+						CandidateId:  rf.me,
+						LastLogIndex: 0,
+						LastLogTerm:  0,
+					}
+					reply := &RequestVoteReply{}
+					if rf.sendRequestVote(i, args, reply) {
+						if reply.VoteGranted {
+							for !atomic.CompareAndSwapInt32(&voteCount, voteCount, voteCount+1) {
+							}
+							if voteCount > threshold {
+
+							}
+						}
+					} else {
+						log.Println("Failed to send requestVote RPC to peer ", i)
+					}
+				}
+			}
+
+		}
+	}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
