@@ -140,7 +140,7 @@ func MakeNetwork() *Network {
 	rn.ends = map[interface{}]*ClientEnd{}
 	rn.enabled = map[interface{}]bool{}
 	rn.servers = map[interface{}]*Server{}
-	rn.connections = map[interface{}](interface{}){}
+	rn.connections = map[interface{}]interface{}{}
 	rn.endCh = make(chan reqMsg)
 	rn.done = make(chan struct{})
 

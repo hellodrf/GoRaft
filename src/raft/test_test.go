@@ -24,13 +24,13 @@ func TestInitialElection2A(t *testing.T) {
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
-	cfg.begin("Test (2A): initial election")
+	cfg.begin("Test (2A): initial Election")
 
 	// is a leader elected?
 	cfg.checkOneLeader()
 
 	// sleep a bit to avoid racing with followers learning of the
-	// election, then check that all peers agree on the term.
+	// Election, then check that all peers agree on the term.
 	time.Sleep(50 * time.Millisecond)
 	term1 := cfg.checkTerms()
 	if term1 < 1 {
@@ -55,31 +55,37 @@ func TestReElection2A(t *testing.T) {
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
-	cfg.begin("Test (2A): election after network failure")
+	cfg.begin("Test (2A): Election after network failure")
 
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
+	fmt.Println("Disconnected", leader1)
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
+	fmt.Println("Reconnected", leader1)
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no leader should
 	// be elected.
+	fmt.Println("Disconnected", leader2)
 	cfg.disconnect(leader2)
+	fmt.Println("Disconnected", (leader2+1)%servers)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
+	fmt.Println("Reconnected", (leader2+1)%servers)
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
+	fmt.Println("Reconnected", leader2)
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
 
@@ -914,7 +920,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 		// Make crash/restart infrequent enough that the peers can often
 		// keep up, but not so infrequent that everything has settled
 		// down from one change to the next. Pick a value smaller than
-		// the election timeout, but not hugely smaller.
+		// the Election timeout, but not hugely smaller.
 		time.Sleep((RaftElectionTimeout * 7) / 10)
 	}
 
