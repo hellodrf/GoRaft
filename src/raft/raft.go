@@ -63,13 +63,15 @@ type Raft struct {
 	currentTerm int32
 	votedFor    int32
 	logs        []LogEntry
-	state       int32 // -1 follower; 0 candidate; 1 leader
+	state       int32
 
 	// Volatile
-	commitIndex int
-	lastApplied int
-	nextIndex   []int32
-	matchIndex  []int32
+	innitMu     sync.Mutex
+	commitIndex int32
+	lastApplied int32
+
+	nextIndex  []int32
+	matchIndex []int32
 
 	// Channels
 	electionChan  chan int
@@ -78,12 +80,24 @@ type Raft struct {
 
 type LogEntry struct {
 	Term    int32
-	Command string
+	Command interface{}
 }
 
 func (rf *Raft) Log(s string) {
-	log.Println("Node", strconv.Itoa(rf.me)+" (S"+strconv.Itoa(int(rf.state))+"|T"+strconv.Itoa(int(rf.currentTerm))+
-		"|L"+strconv.Itoa(int(rf.votedFor))+"): "+s)
+	log.Println("Node", strconv.Itoa(rf.me)+" (S"+strconv.Itoa(int(atomic.LoadInt32(&rf.state)))+
+		"|T"+strconv.Itoa(int(atomic.LoadInt32(&rf.currentTerm)))+
+		"|L"+strconv.Itoa(int(atomic.LoadInt32(&rf.votedFor)))+"): "+s)
+}
+
+func (rf *Raft) initialiseVolatile() {
+	//rf.innitMu.Lock()
+	rf.nextIndex = []int32{}
+	rf.matchIndex = []int32{}
+	for range rf.peers {
+		rf.nextIndex = append(rf.nextIndex, 0)
+		rf.matchIndex = append(rf.matchIndex, 0)
+	}
+	//rf.innitMu.Unlock()
 }
 
 // return currentTerm and whether this server
@@ -179,35 +193,35 @@ func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if args.Term < rf.currentTerm {
+	mu.Lock() // lock currentTerm
+	if args.Term < atomic.LoadInt32(&rf.currentTerm) {
 		rf.Log("AppendEntries RPC outdated! - L" + strconv.Itoa(args.LeaderId) + "|T" + strconv.Itoa(int(args.Term)))
 		reply.Success = false
-		reply.Term = rf.currentTerm
+		reply.Term = atomic.LoadInt32(&rf.currentTerm)
+		mu.Unlock()
 		return
 	}
 
-	if args.Entries == nil {
+	if args.Entries == nil { // heartbeat
+		mu.Unlock()
 		rf.Log("Heartbeat received from " + strconv.Itoa(args.LeaderId))
-		atomic.StoreInt32(&rf.currentTerm, args.Term)
 		atomic.StoreInt32(&rf.votedFor, int32(args.LeaderId))
 
 		if atomic.LoadInt32(&rf.state) != -1 {
+			rf.checkAbdicate(args.Term, "HB", "REQUEST", int(args.LeaderId))
 			rf.Log("Accepted leader " + strconv.Itoa(args.LeaderId))
-			atomic.StoreInt32(&rf.state, -1)
-		}
-
-		if atomic.LoadInt32(&rf.state) == 1 {
-			rf.heartbeatChan <- 0 // stop Heartbeat
 		}
 
 		rf.electionChan <- 1
 		reply.Success = true
-		reply.Term = rf.currentTerm
+		reply.Term = atomic.LoadInt32(&rf.currentTerm)
 		return
+	} else { // log entries
+		rf.checkAbdicate(args.Term, "LOG", "REQUEST", int(args.LeaderId))
 	}
 
 	reply.Success = false
-	reply.Term = rf.currentTerm
+	reply.Term = atomic.LoadInt32(&rf.currentTerm)
 }
 
 //
@@ -215,18 +229,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm {
-		rf.Log("Devoted " + strconv.Itoa(int(args.CandidateId)) + " (Term_error)")
+	rf.checkAbdicate(reply.Term, "VOTE", "REQUEST", int(args.CandidateId))
+
+	mu.Lock() // lock currentTerm
+	defer mu.Unlock()
+	reply.Term = atomic.LoadInt32(&rf.currentTerm)
+	if args.Term < atomic.LoadInt32(&rf.currentTerm) {
+		rf.Log("Devoted " + strconv.Itoa(int(args.CandidateId)) + " (Term_Error)")
 		reply.VoteGranted = false
 		return
 	}
 
 	vt := atomic.LoadInt32(&rf.votedFor)
-	if vt == -1 || args.Term > rf.currentTerm {
-		rf.Log("Voted " + strconv.Itoa(int(args.CandidateId)))
+	if vt == -1 || args.Term > atomic.LoadInt32(&rf.currentTerm) {
 		reply.VoteGranted = true
 		atomic.StoreInt32(&rf.votedFor, args.CandidateId)
+		rf.Log("Voted " + strconv.Itoa(int(args.CandidateId)))
 		return
 	} else {
 		rf.Log("Devoted " + strconv.Itoa(int(args.CandidateId)) + " (Already_Voted)")
@@ -286,9 +304,15 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := atomic.LoadInt32(&rf.state) == 1
 
 	// Your code here (2B).
+	if !isLeader || rf.killed() {
+		return index, term, isLeader
+	}
+
+	index = int(atomic.LoadInt32(&rf.commitIndex)) + 1
+	term = int(atomic.LoadInt32(&rf.currentTerm))
 
 	return index, term, isLeader
 }
@@ -309,8 +333,6 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.electionChan <- -1
 	rf.heartbeatChan <- -1
-	close(rf.electionChan)
-	close(rf.heartbeatChan)
 }
 
 func (rf *Raft) killed() bool {
@@ -318,17 +340,36 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) checkAbdicate(Term int32, RPCType string, MessageType string, Node int) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	if Term > atomic.LoadInt32(&rf.currentTerm) && atomic.LoadInt32(&rf.state) != -1 {
+		atomic.StoreInt32(&rf.currentTerm, Term)
+		if atomic.LoadInt32(&rf.state) == 1 {
+			rf.Log("Leader abdicated!")
+			rf.heartbeatChan <- 0 // stop Heartbeat
+			rf.initialiseVolatile()
+		}
+		atomic.StoreInt32(&rf.state, -1)
+		rf.Log("Converted to follower by RPC (" + RPCType + "|" + MessageType + "|N" + strconv.Itoa(Node) + "|T" + strconv.Itoa(int(Term)) + ")")
+		return true
+	}
+	return false
+}
+
 func (rf *Raft) Election(source string, term int32) {
-	if term != rf.currentTerm || atomic.LoadInt32(&rf.state) != -1 {
-		rf.Log("Election ceased, leader already exists")
+
+	if term != atomic.LoadInt32(&rf.currentTerm) || atomic.LoadInt32(&rf.state) != -1 {
+		rf.Log("Election ceased: Leader already exists/Duplicate election")
 		return
 	}
-	voteCount := int32(0)
 
-	if !atomic.CompareAndSwapInt32(&rf.currentTerm, rf.currentTerm, rf.currentTerm+1) {
+	if !atomic.CompareAndSwapInt32(&rf.currentTerm, term, term+1) {
 		// only competing process is *accepting a new leader*
 		return
 	}
+
+	voteCount := int32(0)
 	rf.Log("Election triggered by " + source)
 	atomic.StoreInt32(&rf.state, 0)
 	atomic.StoreInt32(&rf.votedFor, int32(rf.me))
@@ -341,32 +382,37 @@ func (rf *Raft) Election(source string, term int32) {
 		go func() {
 			if i != rf.me {
 				args := &RequestVoteArgs{
-					Term:         rf.currentTerm,
+					Term:         atomic.LoadInt32(&rf.currentTerm),
 					CandidateId:  int32(rf.me),
-					LastLogIndex: 0,
+					LastLogIndex: int(atomic.LoadInt32(&rf.lastApplied)),
 					LastLogTerm:  0,
 				}
 				reply := &RequestVoteReply{}
-				rf.Log("Try sending RequestVote RPC: " + strconv.Itoa(i))
-				if rf.sendRequestVote(i, args, reply) {
-					rf.Log("RequestVote RPC sent: " + strconv.Itoa(i))
+				rf.Log("Try sending RequestVote RPC: N" + strconv.Itoa(i))
+
+				if rf.sendRequestVote(i, args, reply) { // send RPC
+					rf.Log("RequestVote RPC sent: N" + strconv.Itoa(i))
+					if rf.checkAbdicate(reply.Term, "RV", "REPLY", i) {
+						return
+					}
+
 					if reply.VoteGranted {
-						for !atomic.CompareAndSwapInt32(&voteCount, voteCount, voteCount+1) {
-						}
-						rf.Log("Vote received: " + strconv.Itoa(i))
-						if voteCount > threshold && atomic.LoadInt32(&rf.dead) == 0 {
+						atomic.AddInt32(&voteCount, 1)
+						rf.Log("Vote received: N" + strconv.Itoa(i))
+						if atomic.LoadInt32(&voteCount) > threshold && atomic.LoadInt32(&rf.dead) == 0 {
 							// we won!
 							atomic.StoreInt32(&rf.state, 1)
 							rf.Log("Won Election!")
 							rf.Heartbeat()
 							rf.heartbeatChan <- 1
+							rf.initialiseVolatile()
 							return
 						}
 					} else {
-						rf.Log("De-vote received from node " + strconv.Itoa(i))
+						rf.Log("De-vote received from N" + strconv.Itoa(i))
 					}
 				} else {
-					rf.Log("Failed to send RequestVote RPC:  " + strconv.Itoa(i))
+					rf.Log("Failed to send RequestVote RPC: N" + strconv.Itoa(i))
 				}
 			}
 
@@ -377,13 +423,13 @@ func (rf *Raft) Election(source string, term int32) {
 	}
 
 	time.Sleep(time.Duration(rand.Intn(200)) * time.Millisecond)
-	if voteCount <= threshold && atomic.LoadInt32(&rf.dead) == 0 {
+	if atomic.LoadInt32(&voteCount) <= threshold && !rf.killed() {
 		if atomic.LoadInt32(&rf.state) != 0 {
 			return
 		}
 		rf.Log("No one won election!")
 		atomic.StoreInt32(&rf.state, -1)
-		rf.Election("failed Election", rf.currentTerm)
+		rf.Election("failed Election", atomic.LoadInt32(&rf.currentTerm))
 	}
 }
 
@@ -408,25 +454,20 @@ func (rf *Raft) Heartbeat() {
 			if atomic.LoadInt32(&rf.state) != 1 {
 				return
 			}
+
 			if i != rf.me {
-				if rf.SendAppendEntries(i, args, reply) {
+				if rf.SendAppendEntries(i, args, reply) { // send RPC
 					if reply.Success {
-						rf.Log("Heartbeat sent to " + strconv.Itoa(i))
+						rf.Log("Heartbeat sent to N" + strconv.Itoa(i))
 					} else {
-						rf.Log("Heartbeat rejected! by Node " + strconv.Itoa(i))
-						if reply.Term > atomic.LoadInt32(&rf.currentTerm) {
-							rf.Log("Leader abdicated! ")
-							atomic.StoreInt32(&rf.currentTerm, reply.Term)
-							rf.heartbeatChan <- 0 // stop Heartbeat
-							atomic.StoreInt32(&rf.state, -1)
-						} else {
-							rf.Log("Byzantine/Already abdicated? N" + strconv.Itoa(i) +
-								"|T" + strconv.Itoa(int(reply.Term)))
-						}
+						rf.Log("Heartbeat rejected by N" + strconv.Itoa(i))
+					}
+					if rf.checkAbdicate(reply.Term, "HB", "REPLY", i) {
+						return
 					}
 				} else {
-					if reply.Term == -1 { // network issue
-						rf.Log("Heartbeat failed to send: " + strconv.Itoa(i))
+					if atomic.LoadInt32(&reply.Term) == -1 { // network issue
+						rf.Log("Heartbeat failed to send: N" + strconv.Itoa(i))
 					}
 				}
 			}
@@ -456,9 +497,10 @@ func Make(peers []*ClientEnd, me int,
 	rf.state = -1
 	rf.currentTerm = 0
 	rf.votedFor = -1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 	rf.logs = make([]LogEntry, 1000)
-	rf.commitIndex = -1
-	rf.lastApplied = -1
+	rf.initialiseVolatile()
 
 	rf.electionChan = make(chan int, 1)
 	rf.heartbeatChan = make(chan int, 1)
@@ -466,7 +508,7 @@ func Make(peers []*ClientEnd, me int,
 	go func() {
 		rand.Seed(time.Now().UnixNano())
 		s := time.Duration(rand.Intn(650-550) + 550) // 450ms - 549ms
-		time.Sleep(time.Duration(rand.Intn(200)) * time.Millisecond)
+		time.Sleep(time.Duration(rand.Intn(300)) * time.Millisecond)
 		rf.Election("fresh startup", 0)
 
 		for {
@@ -478,7 +520,7 @@ func Make(peers []*ClientEnd, me int,
 				}
 			case <-time.After(s * time.Millisecond):
 				if atomic.LoadInt32(&rf.state) < 0 {
-					rf.Election("timeout", rf.currentTerm)
+					rf.Election("timeout", atomic.LoadInt32(&rf.currentTerm))
 				}
 			}
 		}
@@ -493,6 +535,7 @@ func Make(peers []*ClientEnd, me int,
 				rf.Log("Heartbeat goroutine received stop signal " + strconv.Itoa(i))
 				return
 			case 1:
+				rf.Log("Heartbeat started!")
 				for {
 					exit := false
 					select {
