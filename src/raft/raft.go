@@ -187,6 +187,14 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+func (r *AppendEntriesArgs) String() string {
+	if r.Entries == nil {
+		return "{RPC:Heartbeat|REQUEST|N" + strconv.Itoa(r.LeaderId) + "|T" + strconv.Itoa(int(r.Term)) + "}"
+	} else {
+		return "{RPC:LogEntries|REQUEST|N" + strconv.Itoa(r.LeaderId) + "|T" + strconv.Itoa(int(r.Term)) + "}"
+	}
+}
+
 func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
