@@ -1,6 +1,6 @@
 # GoRaft
 
-**Raft in Go**
+**My implementation of Raft in Go**
 
 
 MIT_6.824 Lab2 (Raft): https://pdos.csail.mit.edu/6.824/labs/lab-raft.html
@@ -14,9 +14,9 @@ Raft (D. Ongaro et. al): https://pdos.csail.mit.edu/6.824/papers/raft-extended.p
 
 ## Roadmap:
 
-1. Leader election :white_check_mark:
+1. Leader election    :white_check_mark:
 
-**2. Log Replication**
+2. Log Replication
 
 3. Persistance
 
