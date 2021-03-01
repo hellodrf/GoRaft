@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"log"
 	"math/rand"
 	"strconv"
@@ -99,7 +100,7 @@ func (rf *Raft) Log(s string) {
 		"|L"+strconv.Itoa(int(rf.votedFor))+"): "+s)
 }
 
-func (rf *Raft) PushApply(index int32) {
+func (rf *Raft) apply(index int32) {
 
 }
 
@@ -210,7 +211,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		atomic.StoreInt32(&rf.votedFor, int32(args.LeaderId))
 
 		if atomic.LoadInt32(&rf.state) == STATE_LEADER {
-			rf.heartbeatChan <- 0 // stop Heartbeat
+			rf.Abdicate(args.Term)
 		}
 		if atomic.LoadInt32(&rf.state) != STATE_FOLLOWER {
 			atomic.StoreInt32(&rf.state, STATE_FOLLOWER)
@@ -221,13 +222,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		return
 	} else {
-		if atomic.LoadInt32(&rf.commitIndex) < args.PrevLogIndex {
+		if atomic.LoadInt32(&rf.commitIndex) < args.PrevLogIndex ||
+			rf.logs[args.PrevLogIndex-rf.snapIndex].Term != args.PrevLogTerm {
 			reply.Success = false
 			reply.Term = rf.currentTerm
-			rf.Log("LogEntry missing! Rejecting AppendEntries RPC")
+			rf.Log("LogEntry Mismatch! Rejecting AppendEntries RPC")
 			return
 		}
-
 		// Lock
 		rf.logMu.Lock()
 		defer rf.logMu.Unlock()
@@ -250,10 +251,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 //
-// example RequestVote RPC handler.
+// RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		rf.Log("De-voted N" + strconv.Itoa(int(args.CandidateId)) + " (Term_error)")
@@ -323,9 +323,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := rf.state == STATE_LEADER
 
 	rf.logMu.Lock()
 	defer rf.logMu.Unlock()
@@ -336,20 +333,59 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logs = append(rf.logs, &entry)
 	rf.commitIndex++
 
-	return index, term, isLeader
+	// Flush to followers
+	rf.FlushLog()
+
+	return int(rf.commitIndex), int(rf.currentTerm), rf.state == STATE_LEADER
 }
 
+// MUST FIRST ACQUIRE logMU
 func (rf *Raft) FlushLog() {
-	for i := 0; i < len(rf.peers); i++ {
-
+	fmt.Println(len(rf.logs))
+	if len(rf.logs) == 0 {
+		return
 	}
-	args := AppendEntriesArgs{
-		Term:         atomic.LoadInt32(&rf.currentTerm),
-		LeaderId:     int(atomic.LoadInt32(&rf.votedFor)),
-		PrevLogIndex: rf.lastApplied,
-		PrevLogTerm:  rf.logs[len(rf.logs)-1].Term,
-		Entries:      []*LogEntry{&entry},
-		LeaderCommit: 0,
+	for i := 0; i < len(rf.peers); i++ {
+		if atomic.LoadInt32(&rf.state) == STATE_LEADER && i != rf.me {
+			if int(rf.nextIndex[i]) <= len(rf.logs)-1 {
+				args := AppendEntriesArgs{
+					Term:         atomic.LoadInt32(&rf.currentTerm),
+					LeaderId:     int(atomic.LoadInt32(&rf.votedFor)),
+					PrevLogIndex: rf.nextIndex[i] - 1,
+					PrevLogTerm:  rf.logs[rf.nextIndex[i]].Term,
+					Entries:      rf.logs[rf.nextIndex[i] : rf.commitIndex+1],
+					LeaderCommit: rf.commitIndex,
+				}
+				reply := AppendEntriesReply{}
+				rf.SendAppendEntries(i, &args, &reply)
+				if reply.Success {
+					rf.nextIndex[i] = rf.commitIndex + 1
+					rf.matchIndex[i] = rf.commitIndex
+					rf.Log("Log replicated on N" + strconv.Itoa(i) + " to Index-" + strconv.Itoa(int(rf.commitIndex)))
+				} else {
+					if rf.nextIndex[i] > 0 {
+						s := rf.nextIndex[i]
+						for s >= 0 {
+							s--
+							args := AppendEntriesArgs{
+								Term:         atomic.LoadInt32(&rf.currentTerm),
+								LeaderId:     int(atomic.LoadInt32(&rf.votedFor)),
+								PrevLogIndex: s - 1,
+								PrevLogTerm:  rf.logs[s].Term,
+								Entries:      rf.logs[s : rf.commitIndex+1],
+								LeaderCommit: rf.commitIndex,
+							}
+							rf.SendAppendEntries(i, &args, &reply)
+							if reply.Success {
+								break
+							}
+						}
+					} else {
+						panic("FATAL ERROR - LOG OUT OF INDEX")
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -374,6 +410,13 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+}
+
+func (rf *Raft) Abdicate(term int32) {
+	rf.Log("Leader abdicated!")
+	atomic.StoreInt32(&rf.currentTerm, term)
+	rf.heartbeatChan <- SIGNAL_PAUSE // stop Heartbeat
+	atomic.StoreInt32(&rf.state, STATE_FOLLOWER)
 }
 
 func (rf *Raft) Election(source string, term int32) {
@@ -427,6 +470,17 @@ func (rf *Raft) Election(source string, term int32) {
 							rf.Log("Won Election!")
 							rf.Heartbeat()
 							rf.heartbeatChan <- SIGNAL_PROCEED
+
+							// log
+							rf.logMu.Lock()
+							defer rf.logMu.Unlock()
+							for i := range rf.nextIndex {
+								rf.nextIndex[i] = rf.commitIndex
+							}
+							for i := range rf.matchIndex {
+								rf.matchIndex[i] = rf.commitIndex
+							}
+							rf.FlushLog()
 							return
 						}
 					} else {
@@ -484,10 +538,7 @@ func (rf *Raft) Heartbeat() {
 					} else {
 						rf.Log("Heartbeat rejected! N" + strconv.Itoa(i))
 						if reply.Term > atomic.LoadInt32(&rf.currentTerm) {
-							rf.Log("Leader abdicated!")
-							atomic.StoreInt32(&rf.currentTerm, reply.Term)
-							rf.heartbeatChan <- SIGNAL_PAUSE // stop Heartbeat
-							atomic.StoreInt32(&rf.state, STATE_FOLLOWER)
+							rf.Abdicate(reply.Term)
 						} else {
 							rf.Log("Already abdicated? N" + strconv.Itoa(i) +
 								"|T" + strconv.Itoa(int(reply.Term)))
@@ -499,7 +550,6 @@ func (rf *Raft) Heartbeat() {
 					} else {
 						rf.Log("Outdated Heartbeat failed to send: N" + strconv.Itoa(i) + "|T " + t.String())
 					}
-
 				}
 			}
 		}()
@@ -528,12 +578,18 @@ func Make(peers []*ClientEnd, me int,
 	rf.state = STATE_FOLLOWER
 	rf.currentTerm = 0
 	rf.votedFor = EMPTY
-	rf.logs = make([]*LogEntry, 1000)
 	rf.commitIndex = EMPTY
 	rf.lastApplied = EMPTY
 	rf.snapIndex = EMPTY
+
 	rf.nextIndex = make([]int32, len(peers))
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = 0
+	}
 	rf.matchIndex = make([]int32, len(peers))
+	for i := range rf.matchIndex {
+		rf.matchIndex[i] = 0
+	}
 
 	rf.electionChan = make(chan int, 1)
 	rf.heartbeatChan = make(chan int, 1)
