@@ -3,7 +3,7 @@
 **My implementation of Raft in Go**
 
 
-## Roadmap:
+## Roadmap
 
 1. Leader election    :white_check_mark:
 
