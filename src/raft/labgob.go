@@ -66,10 +66,12 @@ func RegisterName(name string, value interface{}) {
 }
 
 func checkValue(value interface{}) {
+	return
 	checkType(reflect.TypeOf(value))
 }
 
 func checkType(t reflect.Type) {
+	return
 	k := t.Kind()
 
 	mu.Lock()
@@ -120,6 +122,7 @@ func checkType(t reflect.Type) {
 // the non-default value.
 //
 func checkDefault(value interface{}) {
+	return
 	if value == nil {
 		return
 	}

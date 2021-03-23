@@ -3,11 +3,27 @@ package raft
 import "log"
 
 // Debugging
-const Debug = 0
+const Verbose = true
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
+func VPrintf(format string, a ...interface{}) (n int, err error) {
+	if Verbose {
 		log.Printf(format, a...)
 	}
 	return
+}
+
+type DummyLock struct {
+}
+
+func (d *DummyLock) Lock() {
+
+}
+func (d *DummyLock) Unlock() {
+
+}
+func (d *DummyLock) RLock() {
+
+}
+func (d *DummyLock) RUnlock() {
+
 }

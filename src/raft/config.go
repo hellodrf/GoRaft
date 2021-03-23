@@ -221,6 +221,7 @@ func (cfg *config) checkTimeout() {
 }
 
 func (cfg *config) cleanup() {
+	VPrintf("Cleaning-up: %d", len(cfg.rafts))
 	for i := 0; i < len(cfg.rafts); i++ {
 		if cfg.rafts[i] != nil {
 			cfg.rafts[i].Kill()

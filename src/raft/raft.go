@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"log"
 	"math/rand"
 	"strconv"
@@ -61,16 +60,13 @@ const (
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex   // Lock to protect shared access to this peer's state
-	logMu     sync.Mutex   // Lock to log entries
-	peers     []*ClientEnd // RPC end points of all peers
-	persister *Persister   // Object to hold this peer's persisted state
-	me        int          // this peer's index into peers[]
-	dead      int32        // set by Kill()
+	electionMu sync.RWMutex // Lock to protect shared access to this peer's state
+	logMu      sync.RWMutex // Lock to log entries
+	peers      []*ClientEnd // RPC end points of all peers
+	persister  *Persister   // Object to hold this peer's persisted state
+	me         int          // this peer's index into peers[]
+	dead       int32        // set by Kill()
 
-	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
 	// Persistent
 	currentTerm int32
 	votedFor    int32
@@ -81,6 +77,7 @@ type Raft struct {
 	commitIndex int32
 	lastApplied int32
 	snapIndex   int32
+	voteTerm    int32
 
 	nextIndex  []int32
 	matchIndex []int32
@@ -88,6 +85,115 @@ type Raft struct {
 	// Channels
 	electionChan  chan int
 	heartbeatChan chan int
+	applyChan     chan ApplyMsg
+
+	// Counters
+	logFlushCounter *Counter
+
+	// TickExecutor
+	tickExecutor *TickExecutor
+}
+
+// Counter:
+// Counts appearances of int32 keys in inputChan,
+// Upon threshold will invoke predefined callback function (Signature: int32 -> void).
+type Counter struct {
+	countMap  map[int32]int32
+	trashMap  map[int32]bool
+	upto      int32
+	threshold int32
+	callback  func(int32)
+	inputChan chan int32
+}
+
+func MakeCounter(th int32, cb func(int32)) *Counter {
+	c := &Counter{
+		countMap: make(map[int32]int32),
+		//trashMap:  make(map[int32]bool),
+		threshold: th,
+		callback:  cb,
+		inputChan: make(chan int32, 20),
+		upto:      EMPTY,
+	}
+	go func() {
+		for {
+			i := <-c.inputChan
+			if i == SIGNAL_STOP {
+				return
+			}
+			//if _, ok := c.trashMap[i]; ok {
+			//	continue
+			//}
+			if _, ok := c.countMap[i]; !ok && i > c.upto {
+				c.countMap[i] = 0
+				c.upto = i
+			}
+			c.countMap[i]++
+			for k := range c.countMap {
+				if k <= i {
+					c.countMap[k]++
+				}
+				if c.countMap[k] >= c.threshold {
+					_, _ = VPrintf("{VERBOSE} [Counter] Callback invoked: %d", k)
+					go c.callback(k) // invoke callback
+					for k2 := range c.countMap {
+						if k2 <= k {
+							//c.trashMap[k2] = true
+							delete(c.countMap, k2)
+							_, _ = VPrintf("{VERBOSE} [Counter] Garbage key collected: %d", k2)
+						}
+					}
+				}
+			}
+		}
+	}()
+	return c
+}
+
+func (c *Counter) Remove(i int32) {
+	delete(c.countMap, i)
+}
+
+// TickExecutor:
+// Execute bunch of predefined jobs after every tick-period
+// Use ControlChan to shutdown goroutine gracefully
+type TickExecutor struct {
+	mu          sync.RWMutex
+	TickPeriod  time.Duration
+	JobList     []func()
+	ControlChan chan int32
+}
+
+func newTickExecutor(tickPeriod time.Duration) *TickExecutor {
+	e := TickExecutor{
+		TickPeriod:  tickPeriod,
+		ControlChan: make(chan int32, 1),
+	}
+	go func() {
+		for {
+			select {
+			case <-time.After(tickPeriod):
+				for _, f := range e.JobList {
+					if f != nil {
+						go f()
+					}
+				}
+				_, _ = VPrintf("{VERBOSE} [TickExecutor] Tick finished, %d job(s) executed", len(e.JobList))
+			case msg := <-e.ControlChan:
+				if msg == SIGNAL_STOP {
+					return
+				}
+			}
+		}
+	}()
+	return &e
+}
+
+func (e *TickExecutor) Register(f func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.JobList = append(e.JobList, f)
+	_, _ = VPrintf("{VERBOSE} [TickExecutor] Function successfully registered")
 }
 
 type LogEntry struct {
@@ -96,26 +202,25 @@ type LogEntry struct {
 }
 
 func (rf *Raft) Log(s string) {
-	log.Println("Node", strconv.Itoa(rf.me)+" (S"+strconv.Itoa(int(rf.state))+"|T"+strconv.Itoa(int(rf.currentTerm))+
-		"|L"+strconv.Itoa(int(rf.votedFor))+"): "+s)
+	log.Println(rf.String() + ": " + s)
 }
 
-func (rf *Raft) apply(index int32) {
-
+func (rf *Raft) String() string {
+	return "Node " + strconv.Itoa(rf.me) +
+		" (S" + strconv.Itoa(int(atomic.LoadInt32(&rf.state))) +
+		"|T" + strconv.Itoa(int(atomic.LoadInt32(&rf.currentTerm))) +
+		"|V" + strconv.Itoa(int(atomic.LoadInt32(&rf.votedFor))) +
+		"|CI" + strconv.Itoa(int(atomic.LoadInt32(&rf.commitIndex))) +
+		"|LA" + strconv.Itoa(int(atomic.LoadInt32(&rf.lastApplied))) +
+		"|SN" + strconv.Itoa(int(atomic.LoadInt32(&rf.snapIndex))) +
+		"|DEAD" + strconv.Itoa(int(atomic.LoadInt32(&rf.dead))) +
+		"|LOG" + strconv.Itoa(len(rf.logs)-1) + ")"
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isLeader bool
-
-	// Your code here (2A).
-	term = int(atomic.LoadInt32(&rf.currentTerm))
-	isLeader = atomic.LoadInt32(&rf.state) == STATE_LEADER
-
-	return term, isLeader
+	return int(atomic.LoadInt32(&rf.currentTerm)), atomic.LoadInt32(&rf.state) == STATE_LEADER
 }
 
 //
@@ -156,28 +261,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         int32
-	CandidateId  int32
-	LastLogIndex int32
-	LastLogTerm  int32
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	// Your data here (2A).
-	Term        int32
-	VoteGranted bool
-}
-
 type AppendEntriesArgs struct {
 	Term         int32
 	LeaderId     int
@@ -198,6 +281,7 @@ func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// Term Check
 	if args.Term < rf.currentTerm {
 		rf.Log("AppendEntries RPC outdated! - N" + strconv.Itoa(args.LeaderId) + "|T" + strconv.Itoa(int(args.Term)))
 		reply.Success = false
@@ -207,65 +291,97 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.Entries == nil {
 		rf.Log("Heartbeat received from N" + strconv.Itoa(args.LeaderId))
-		atomic.StoreInt32(&rf.currentTerm, args.Term)
-		atomic.StoreInt32(&rf.votedFor, int32(args.LeaderId))
+	}
 
-		if atomic.LoadInt32(&rf.state) == STATE_LEADER {
-			rf.Abdicate(args.Term)
-		}
-		if atomic.LoadInt32(&rf.state) != STATE_FOLLOWER {
-			atomic.StoreInt32(&rf.state, STATE_FOLLOWER)
-			rf.Log("Accepted leader N" + strconv.Itoa(args.LeaderId))
-		}
-		rf.electionChan <- SIGNAL_PROCEED
-		reply.Success = true
-		reply.Term = rf.currentTerm
-		return
-	} else {
-		if atomic.LoadInt32(&rf.commitIndex) < args.PrevLogIndex ||
-			rf.logs[args.PrevLogIndex-rf.snapIndex].Term != args.PrevLogTerm {
+	// Election Stuff
+	atomic.StoreInt32(&rf.currentTerm, args.Term)
+	atomic.StoreInt32(&rf.votedFor, int32(args.LeaderId))
+	if atomic.LoadInt32(&rf.state) == STATE_LEADER {
+		rf.Abdicate(args.Term)
+	}
+	if atomic.LoadInt32(&rf.state) != STATE_FOLLOWER {
+		atomic.StoreInt32(&rf.state, STATE_FOLLOWER)
+		rf.Log("Accepted leader N" + strconv.Itoa(args.LeaderId))
+	}
+	rf.electionChan <- SIGNAL_PROCEED
+	reply.Success = true
+	reply.Term = rf.currentTerm
+
+	// Log Stuff
+	if args.Entries != nil {
+		// Entries
+		rf.logMu.RLock() // RLock
+		if args.PrevLogIndex != -1 && (int32(len(rf.logs)-1)+rf.snapIndex < args.PrevLogIndex ||
+			rf.logs[args.PrevLogIndex-atomic.LoadInt32(&rf.snapIndex)].Term != args.PrevLogTerm) {
 			reply.Success = false
-			reply.Term = rf.currentTerm
+			reply.Term = atomic.LoadInt32(&rf.currentTerm)
 			rf.Log("LogEntry Mismatch! Rejecting AppendEntries RPC")
 			return
 		}
-		// Lock
-		rf.logMu.Lock()
+		rf.logMu.RUnlock()
+		rf.logMu.Lock() // WLock
 		defer rf.logMu.Unlock()
-
 		rf.Log("LogEntries Received from N" + strconv.Itoa(args.LeaderId))
-		if rf.commitIndex > args.PrevLogIndex {
-			rf.logs = rf.logs[:args.PrevLogIndex-rf.snapIndex]
-			rf.commitIndex = args.PrevLogIndex
+
+		if args.PrevLogIndex != -1 && rf.commitIndex > args.PrevLogIndex {
+			rf.logs = rf.logs[:args.PrevLogIndex-atomic.LoadInt32(&rf.snapIndex)]
+			atomic.StoreInt32(&rf.commitIndex, args.PrevLogIndex)
 			rf.Log("LogEntry Conflict! Trimming Log to " + strconv.Itoa(int(args.PrevLogIndex)))
 		}
-
 		rf.logs = append(rf.logs, args.Entries...)
-		rf.commitIndex += int32(len(args.Entries))
-		rf.Log("AppendEntries RPC Accepted! Log Committed to " + strconv.Itoa(args.LeaderId))
-
-		reply.Success = true
-		reply.Term = rf.currentTerm
+		rf.Log("AppendEntries RPC Accepted! Log stored upto (I" + strconv.Itoa(len(rf.logs)-1) + ")")
 	}
 
+	if args.LeaderCommit > rf.commitIndex {
+		atomic.StoreInt32(&rf.commitIndex, args.LeaderCommit)
+		rf.Log("Follower flushing apply (I" + strconv.Itoa(int(rf.commitIndex)) + ")")
+		rf.FlushApply()
+	}
+
+}
+
+type RequestVoteArgs struct {
+	// Your data here (2A, 2B).
+	Term         int32
+	CandidateId  int32
+	LastLogIndex int32
+	LastLogTerm  int32
+}
+
+func (a *RequestVoteArgs) String() string {
+	return "[RequestVoteArgs|Term=" + strconv.Itoa(int(a.Term)) + "|CandidateId=" + strconv.Itoa(int(a.CandidateId)) +
+		"|LastLogIndex=" + strconv.Itoa(int(a.LastLogIndex)) + "|LastLogTerm=" + strconv.Itoa(int(a.LastLogTerm)) + "]"
+}
+
+type RequestVoteReply struct {
+	// Your data here (2A).
+	Term        int32
+	VoteGranted bool
 }
 
 //
 // RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm {
-		rf.Log("De-voted N" + strconv.Itoa(int(args.CandidateId)) + " (Term_error)")
+	reply.Term = atomic.LoadInt32(&rf.currentTerm)
+	if args.Term < atomic.LoadInt32(&rf.currentTerm) {
+		rf.Log("De-Voted N" + strconv.Itoa(int(args.CandidateId)) + " (Term_error)")
 		reply.VoteGranted = false
 		return
 	}
 
-	vt := atomic.LoadInt32(&rf.votedFor)
-	if vt == -1 || args.Term > rf.currentTerm {
+	if atomic.LoadInt32(&rf.votedFor) == args.CandidateId && args.Term == atomic.LoadInt32(&rf.voteTerm) {
+		// Duplicate RequestVote
+		rf.Log("WARN: Duplicate RequestVote from N" + strconv.Itoa(int(args.CandidateId)))
+		reply.VoteGranted = false
+		return
+	}
+	if atomic.LoadInt32(&rf.votedFor) == -1 || atomic.LoadInt32(&rf.voteTerm) < args.Term &&
+		args.Term > atomic.LoadInt32(&rf.currentTerm) {
+		atomic.StoreInt32(&rf.voteTerm, args.Term)
 		rf.Log("Voted N" + strconv.Itoa(int(args.CandidateId)))
-		reply.VoteGranted = true
 		atomic.StoreInt32(&rf.votedFor, args.CandidateId)
+		reply.VoteGranted = true
 		return
 	} else {
 		rf.Log("De-Voted N" + strconv.Itoa(int(args.CandidateId)) + " (Already_Voted)")
@@ -323,67 +439,140 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	if atomic.LoadInt32(&rf.state) == STATE_LEADER {
+		entry := LogEntry{
+			Term:    atomic.LoadInt32(&rf.currentTerm),
+			Command: command,
+		}
+		rf.logs = append(rf.logs, &entry)
+		rf.Log("Command received from client, promised at I" + strconv.Itoa(len(rf.logs)-1))
 
-	rf.logMu.Lock()
-	defer rf.logMu.Unlock()
-	entry := LogEntry{
-		Term:    atomic.LoadInt32(&rf.currentTerm),
-		Command: command,
+		// Flush to followers
+		rf.FlushLog()
 	}
-	rf.logs = append(rf.logs, &entry)
-	rf.commitIndex++
+	return len(rf.logs), int(rf.currentTerm), rf.state == STATE_LEADER
+}
 
-	// Flush to followers
-	rf.FlushLog()
+func (rf *Raft) checkFlushApply() {
+	if atomic.LoadInt32(&rf.lastApplied) < atomic.LoadInt32(&rf.commitIndex) {
+		rf.FlushApply()
+	}
+}
 
-	return int(rf.commitIndex), int(rf.currentTerm), rf.state == STATE_LEADER
+func (rf *Raft) FlushApply() {
+	if len(rf.logs) == 0 {
+		return
+	}
+	rf.logMu.RLock()
+	defer rf.logMu.RUnlock()
+
+	for i := atomic.LoadInt32(&rf.lastApplied) + 1; i <= atomic.LoadInt32(&rf.commitIndex); i++ {
+		if i < atomic.LoadInt32(&rf.lastApplied) {
+			continue
+		}
+		iSnap := i + atomic.LoadInt32(&rf.snapIndex)
+		rf.Log("Pushing to apply (I" + strconv.Itoa(int(iSnap)) + ")")
+		rf.apply(rf.logs[i].Command, iSnap)
+		atomic.StoreInt32(&rf.lastApplied, i)
+	}
+}
+
+func (rf *Raft) apply(command interface{}, index int32) {
+	if index < atomic.LoadInt32(&rf.lastApplied)+atomic.LoadInt32(&rf.snapIndex) {
+		return
+	}
+	msg := ApplyMsg{
+		CommandValid: true,
+		Command:      command,
+		CommandIndex: int(index + 1),
+	}
+	rf.applyChan <- msg
+	rf.Log("Command successfully applied to state-machine (I" + strconv.Itoa(int(index)) + ")")
 }
 
 // MUST FIRST ACQUIRE logMU
 func (rf *Raft) FlushLog() {
-	fmt.Println(len(rf.logs))
 	if len(rf.logs) == 0 {
 		return
 	}
 	for i := 0; i < len(rf.peers); i++ {
-		if atomic.LoadInt32(&rf.state) == STATE_LEADER && i != rf.me {
-			if int(rf.nextIndex[i]) <= len(rf.logs)-1 {
-				args := AppendEntriesArgs{
-					Term:         atomic.LoadInt32(&rf.currentTerm),
-					LeaderId:     int(atomic.LoadInt32(&rf.votedFor)),
-					PrevLogIndex: rf.nextIndex[i] - 1,
-					PrevLogTerm:  rf.logs[rf.nextIndex[i]].Term,
-					Entries:      rf.logs[rf.nextIndex[i] : rf.commitIndex+1],
-					LeaderCommit: rf.commitIndex,
-				}
-				reply := AppendEntriesReply{}
-				rf.SendAppendEntries(i, &args, &reply)
-				if reply.Success {
-					rf.nextIndex[i] = rf.commitIndex + 1
-					rf.matchIndex[i] = rf.commitIndex
-					rf.Log("Log replicated on N" + strconv.Itoa(i) + " to Index-" + strconv.Itoa(int(rf.commitIndex)))
-				} else {
-					if rf.nextIndex[i] > 0 {
-						s := rf.nextIndex[i]
-						for s >= 0 {
-							s--
-							args := AppendEntriesArgs{
-								Term:         atomic.LoadInt32(&rf.currentTerm),
-								LeaderId:     int(atomic.LoadInt32(&rf.votedFor)),
-								PrevLogIndex: s - 1,
-								PrevLogTerm:  rf.logs[s].Term,
-								Entries:      rf.logs[s : rf.commitIndex+1],
-								LeaderCommit: rf.commitIndex,
-							}
-							rf.SendAppendEntries(i, &args, &reply)
+		go rf.sendFlushLog(i)
+	}
+}
+
+func (rf *Raft) sendFlushLog(target int) {
+	if rf.nextIndex[target] == -1 {
+		return
+	}
+	if atomic.LoadInt32(&rf.state) == STATE_LEADER && target != rf.me && int(rf.nextIndex[target]) <= len(rf.logs)-1 {
+		rf.logMu.RLock()
+		cutOff := len(rf.logs) - 1
+		args := AppendEntriesArgs{
+			Term:         atomic.LoadInt32(&rf.currentTerm),
+			LeaderId:     int(atomic.LoadInt32(&rf.votedFor)),
+			PrevLogIndex: atomic.LoadInt32(&rf.nextIndex[target]) - 1,
+			PrevLogTerm:  rf.logs[atomic.LoadInt32(&rf.nextIndex[target])].Term,
+			Entries:      rf.logs[atomic.LoadInt32(&rf.nextIndex[target]) : cutOff+1],
+			LeaderCommit: rf.commitIndex,
+		}
+		rf.logMu.RUnlock()
+		reply := AppendEntriesReply{}
+		if rf.nextIndex[target] == int32(cutOff) {
+			rf.Log("Try sending Log to N" + strconv.Itoa(target) + ": I" +
+				strconv.Itoa(int(rf.nextIndex[target])))
+		} else {
+			rf.Log("Try sending Log to N" + strconv.Itoa(target) + ": I" +
+				strconv.Itoa(int(rf.nextIndex[target])) + "-" + strconv.Itoa(cutOff))
+		}
+		atomic.StoreInt32(&rf.nextIndex[target], int32(cutOff+1))
+
+		if rf.SendAppendEntries(target, &args, &reply) {
+			if reply.Success {
+				atomic.StoreInt32(&rf.nextIndex[target], int32(cutOff+1))
+				atomic.StoreInt32(&rf.matchIndex[target], int32(cutOff))
+				rf.Log("Log replicated on N" + strconv.Itoa(target) + " to I" + strconv.Itoa(cutOff))
+				rf.logFlushCounter.inputChan <- int32(cutOff)
+			} else {
+				if rf.nextIndex[target] > 0 {
+					s := rf.nextIndex[target]
+					for s > 0 {
+						s--
+						cutOff = len(rf.logs) - 1
+						rf.Log("Log disparity reported by N" + strconv.Itoa(target) + ", retrying at I" +
+							strconv.Itoa(int(s)))
+						args := AppendEntriesArgs{
+							Term:         atomic.LoadInt32(&rf.currentTerm),
+							LeaderId:     int(atomic.LoadInt32(&rf.votedFor)),
+							PrevLogIndex: s - 1,
+							PrevLogTerm:  rf.logs[s].Term,
+							Entries:      rf.logs[s : cutOff+1],
+							LeaderCommit: rf.commitIndex,
+						}
+						if rf.SendAppendEntries(target, &args, &reply) {
 							if reply.Success {
+								atomic.StoreInt32(&rf.nextIndex[target], int32(cutOff+1))
+								atomic.StoreInt32(&rf.matchIndex[target], int32(cutOff))
+								rf.Log("Log replicated on N" + strconv.Itoa(target) + " to I" + strconv.Itoa(cutOff))
+								rf.logFlushCounter.inputChan <- int32(cutOff)
 								break
 							}
+						} else {
+							if !rf.killed() {
+								rf.Log("Failed to send AppendEntries to " + strconv.Itoa(target) +
+									": upto-I" + strconv.Itoa(int(s)))
+								s++
+							}
 						}
-					} else {
-						panic("FATAL ERROR - LOG OUT OF INDEX")
 					}
+				} else {
+					panic("FATAL ERROR - LOG OUT OF INDEX")
 				}
+			}
+		} else {
+			if !rf.killed() {
+				rf.Log("Failed to send AppendEntries to " + strconv.Itoa(target) +
+					": upto-I" + strconv.Itoa(int(rf.commitIndex)))
+				rf.sendFlushLog(target)
 			}
 		}
 	}
@@ -401,10 +590,12 @@ func (rf *Raft) FlushLog() {
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
+	rf.Log("Kill() Called, closing down gracefully...")
 	rf.electionChan <- SIGNAL_STOP
 	rf.heartbeatChan <- SIGNAL_STOP
+	rf.logFlushCounter.inputChan <- SIGNAL_STOP
+	rf.tickExecutor.ControlChan <- SIGNAL_STOP
+	atomic.StoreInt32(&rf.dead, 1)
 }
 
 func (rf *Raft) killed() bool {
@@ -420,89 +611,28 @@ func (rf *Raft) Abdicate(term int32) {
 }
 
 func (rf *Raft) Election(source string, term int32) {
-	if term != rf.currentTerm || atomic.LoadInt32(&rf.state) != STATE_FOLLOWER {
-		rf.Log("Election ceased, leader already exists")
+	if rf.killed() || term != rf.currentTerm || atomic.LoadInt32(&rf.state) != STATE_FOLLOWER {
+		rf.Log("Election ceased prematurely (no need to elect)")
 		return
 	}
-	voteCount := int32(0)
-
-	if !atomic.CompareAndSwapInt32(&rf.currentTerm, rf.currentTerm, rf.currentTerm+1) {
-		// only competing process is *accepting a new leader*
-		return
-	}
+	atomic.AddInt32(&rf.currentTerm, 1)
 	rf.Log("Election triggered by " + source)
 	atomic.StoreInt32(&rf.state, STATE_CANDIDATE)
 	atomic.StoreInt32(&rf.votedFor, int32(rf.me))
 	rf.Log("Voted myself!")
-	voteCount = int32(1)
+	voteCount := int32(1)
 	threshold := int32(len(rf.peers) / 2)
-
 	waitGroup := sync.WaitGroup{}
 
 	for i := 0; i < len(rf.peers); i++ {
-		i := i
-		if atomic.LoadInt32(&rf.state) != STATE_CANDIDATE || rf.killed() {
-			return
-		}
-
-		go func() {
-			waitGroup.Add(1)
-			defer waitGroup.Done()
-
-			if i != rf.me {
-				args := &RequestVoteArgs{
-					Term:         rf.currentTerm,
-					CandidateId:  int32(rf.me),
-					LastLogIndex: 0,
-					LastLogTerm:  0,
-				}
-				reply := &RequestVoteReply{}
-				rf.Log("Try sending RequestVote RPC: N" + strconv.Itoa(i))
-				if rf.sendRequestVote(i, args, reply) {
-					rf.Log("RequestVote RPC sent: N" + strconv.Itoa(i))
-					if reply.VoteGranted {
-						for !atomic.CompareAndSwapInt32(&voteCount, voteCount, voteCount+1) {
-						}
-						rf.Log("Vote received: N" + strconv.Itoa(i))
-						if voteCount > threshold && atomic.LoadInt32(&rf.dead) == 0 {
-							// we won!
-							atomic.StoreInt32(&rf.state, STATE_LEADER)
-							rf.Log("Won Election!")
-							rf.Heartbeat()
-							rf.heartbeatChan <- SIGNAL_PROCEED
-
-							// log
-							rf.logMu.Lock()
-							defer rf.logMu.Unlock()
-							for i := range rf.nextIndex {
-								rf.nextIndex[i] = rf.commitIndex
-							}
-							for i := range rf.matchIndex {
-								rf.matchIndex[i] = rf.commitIndex
-							}
-							rf.FlushLog()
-							return
-						}
-					} else {
-						rf.Log("De-vote received: N" + strconv.Itoa(i))
-					}
-				} else {
-					if atomic.LoadInt32(&rf.state) == STATE_CANDIDATE {
-						rf.Log("RequestVote RPC failed to send: N" + strconv.Itoa(i))
-					} else {
-						rf.Log("Outdated RequestVote RPC failed to send: N" + strconv.Itoa(i))
-					}
-				}
-			}
-		}()
+		target := i
+		go rf.Campaign(target, &waitGroup, &voteCount, &threshold)
 	}
 
 	waitGroup.Wait()
-
 	if atomic.LoadInt32(&rf.state) != STATE_CANDIDATE || rf.killed() {
 		return
 	}
-
 	time.Sleep(time.Duration(rand.Intn(200)) * time.Millisecond)
 	if voteCount <= threshold && atomic.LoadInt32(&rf.dead) == 0 {
 		if atomic.LoadInt32(&rf.state) != STATE_CANDIDATE || rf.killed() {
@@ -514,13 +644,83 @@ func (rf *Raft) Election(source string, term int32) {
 	}
 }
 
+func (rf *Raft) Campaign(target int, wg *sync.WaitGroup, voteCount *int32, threshold *int32) bool {
+	if rf.killed() || atomic.LoadInt32(&rf.state) != STATE_CANDIDATE {
+		return true
+	}
+	if target != rf.me {
+		wg.Add(1)
+		defer wg.Done()
+		args := &RequestVoteArgs{
+			Term:         rf.currentTerm,
+			CandidateId:  int32(rf.me),
+			LastLogIndex: 0,
+			LastLogTerm:  0,
+		}
+		reply := &RequestVoteReply{}
+
+		rf.Log("Try sending RequestVote RPC: N" + strconv.Itoa(target))
+		if rf.sendRequestVote(target, args, reply) {
+			rf.Log("RequestVote RPC sent: N" + strconv.Itoa(target))
+			if reply.VoteGranted {
+				atomic.AddInt32(voteCount, 1)
+				rf.Log("Vote received: N" + strconv.Itoa(target))
+				rf.electionMu.Lock()
+				if atomic.LoadInt32(voteCount) > atomic.LoadInt32(threshold) && atomic.LoadInt32(&rf.dead) == 0 {
+					// we won!
+					rf.Log("Election Won!")
+					rf.Coronation()
+					return true
+				}
+				rf.electionMu.Unlock()
+			} else {
+				rf.Log("De-vote received: N" + strconv.Itoa(target))
+				return false
+			}
+		} else {
+			if atomic.LoadInt32(&rf.state) == STATE_CANDIDATE {
+				if !rf.killed() {
+					rf.Log("RequestVote RPC failed to send: N" + strconv.Itoa(target))
+					go rf.Campaign(target, wg, voteCount, threshold)
+				}
+				return false
+			} else {
+				if !rf.killed() {
+					rf.Log("Outdated RequestVote RPC failed to send: N" + strconv.Itoa(target))
+				}
+
+				return true
+			}
+		}
+	}
+	return true
+}
+
+func (rf *Raft) Coronation() {
+	atomic.StoreInt32(&rf.state, STATE_LEADER)
+	rf.Log("Coronation in action: starting Heartbeat")
+	rf.Heartbeat()
+	rf.heartbeatChan <- SIGNAL_PROCEED
+
+	// log
+	rf.logMu.Lock()
+	for i := range rf.nextIndex {
+		atomic.StoreInt32(&rf.nextIndex[i], int32(len(rf.logs))+atomic.LoadInt32(&rf.snapIndex))
+	}
+	for i := range rf.matchIndex {
+		atomic.StoreInt32(&rf.matchIndex[i], 0)
+	}
+	rf.logMu.Unlock()
+	rf.FlushLog()
+}
+
 func (rf *Raft) Heartbeat() {
 	args := &AppendEntriesArgs{
 		Term:         atomic.LoadInt32(&rf.currentTerm),
 		LeaderId:     rf.me,
 		PrevLogIndex: EMPTY,
 		Entries:      nil,
-		LeaderCommit: EMPTY,
+		LeaderCommit: atomic.LoadInt32(&rf.commitIndex),
 	}
 	reply := &AppendEntriesReply{}
 
@@ -531,12 +731,11 @@ func (rf *Raft) Heartbeat() {
 		}
 		go func() {
 			if atomic.LoadInt32(&rf.state) == STATE_LEADER && i != rf.me {
-				t := time.Now()
 				if rf.SendAppendEntries(i, args, reply) {
 					if reply.Success {
-						rf.Log("Heartbeat sent: N" + strconv.Itoa(i))
+						rf.Log("Heartbeat sent to N" + strconv.Itoa(i))
 					} else {
-						rf.Log("Heartbeat rejected! N" + strconv.Itoa(i))
+						rf.Log("Heartbeat rejected by N" + strconv.Itoa(i))
 						if reply.Term > atomic.LoadInt32(&rf.currentTerm) {
 							rf.Abdicate(reply.Term)
 						} else {
@@ -546,9 +745,14 @@ func (rf *Raft) Heartbeat() {
 					}
 				} else {
 					if atomic.LoadInt32(&rf.state) == STATE_LEADER {
-						rf.Log("Heartbeat failed to send: N" + strconv.Itoa(i) + "|T " + t.String())
+						if !rf.killed() {
+							rf.Log("Heartbeat failed to send: N" + strconv.Itoa(i) + "|T ")
+						}
+
 					} else {
-						rf.Log("Outdated Heartbeat failed to send: N" + strconv.Itoa(i) + "|T " + t.String())
+						if !rf.killed() {
+							rf.Log("Outdated Heartbeat failed to send: N" + strconv.Itoa(i) + "|T ")
+						}
 					}
 				}
 			}
@@ -574,13 +778,12 @@ func Make(peers []*ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here (2A, 2B, 2C).
 	rf.state = STATE_FOLLOWER
 	rf.currentTerm = 0
 	rf.votedFor = EMPTY
 	rf.commitIndex = EMPTY
 	rf.lastApplied = EMPTY
-	rf.snapIndex = EMPTY
+	rf.snapIndex = 0
 
 	rf.nextIndex = make([]int32, len(peers))
 	for i := range rf.nextIndex {
@@ -593,6 +796,15 @@ func Make(peers []*ClientEnd, me int,
 
 	rf.electionChan = make(chan int, 1)
 	rf.heartbeatChan = make(chan int, 1)
+	rf.applyChan = applyCh
+	rf.logFlushCounter = MakeCounter(int32(len(rf.peers)/2-1),
+		func(i int32) {
+			atomic.StoreInt32(&rf.commitIndex, i)
+			rf.FlushApply()
+		})
+
+	rf.tickExecutor = newTickExecutor(1 * time.Second)
+	rf.tickExecutor.Register(rf.checkFlushApply)
 
 	go func() {
 		rand.Seed(time.Now().UnixNano())

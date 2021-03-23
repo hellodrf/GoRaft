@@ -3,5 +3,5 @@ package main
 import "fmt"
 
 func main() {
-	fmt.Println(string(rune(1)))
+	fmt.Println(false && true || true)
 }
