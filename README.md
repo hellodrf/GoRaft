@@ -15,10 +15,6 @@
 
 5. KV store
 
-6. KV store with snapshot
-
-7. Sharded KV store
-
 
 ## Literatures
 
