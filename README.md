@@ -9,11 +9,9 @@
 
 2. Log Replication      [Test Cases: 2/8]
 
-3. Persistance
+3. Persistance & Log Compaction
 
-4. Log compaction
-
-5. KV store
+4. KV store
 
 
 ## Literatures
