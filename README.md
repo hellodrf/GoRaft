@@ -7,7 +7,7 @@
 
 1. Leader election    :white_check_mark:
 
-2. Log Replication    [Test Cases: 2/8]
+2. Log Replication      [Test Cases: 2/8]
 
 3. Persistance
 
